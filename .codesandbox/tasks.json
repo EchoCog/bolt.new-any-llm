@@ -1,0 +1,89 @@
+{
+  // These tasks will run in order when initializing your CodeSandbox project.
+  "setupTasks": [
+    {
+      "name": "Installing Dependencies",
+      "command": "pnpm install"
+    }
+  ],
+
+  // These tasks can be run from CodeSandbox. Running one will open a log in the app.
+  "tasks": {
+    "deploy": {
+      "name": "deploy",
+      "command": "pnpm deploy"
+    },
+    "build": {
+      "name": "build",
+      "command": "pnpm build"
+    },
+    "dev": {
+      "name": "dev",
+      "command": "pnpm dev",
+      "runAtStart": true,
+      "preview": {
+        "port": 5173
+      }
+    },
+    "test": {
+      "name": "test",
+      "command": "pnpm test"
+    },
+    "test:watch": {
+      "name": "test:watch",
+      "command": "pnpm test:watch"
+    },
+    "lint": {
+      "name": "lint",
+      "command": "pnpm lint"
+    },
+    "lint:fix": {
+      "name": "lint:fix",
+      "command": "pnpm lint:fix"
+    },
+    "start:windows": {
+      "name": "start:windows",
+      "command": "pnpm start:windows"
+    },
+    "start:unix": {
+      "name": "start:unix",
+      "command": "pnpm start:unix"
+    },
+    "start": {
+      "name": "start",
+      "command": "pnpm start"
+    },
+    "dockerstart": {
+      "name": "dockerstart",
+      "command": "pnpm dockerstart"
+    },
+    "dockerrun": {
+      "name": "dockerrun",
+      "command": "pnpm dockerrun"
+    },
+    "dockerbuild:prod": {
+      "name": "dockerbuild:prod",
+      "command": "pnpm dockerbuild:prod"
+    },
+    "dockerbuild": {
+      "name": "dockerbuild",
+      "command": "pnpm dockerbuild"
+    },
+    "typecheck": {
+      "name": "typecheck",
+      "command": "pnpm typecheck"
+    },
+    "typegen": {
+      "name": "typegen",
+      "command": "pnpm typegen"
+    },
+    "preview": {
+      "name": "preview",
+      "command": "pnpm preview"
+    },
+    "prepare": {
+      "name": "prepare",
+      "command": "pnpm prepare"
+    }
+  }
+}
