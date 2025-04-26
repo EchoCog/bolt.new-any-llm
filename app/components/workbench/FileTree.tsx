@@ -8,6 +8,24 @@ const logger = createScopedLogger('FileTree');
 const NODE_PADDING_LEFT = 8;
 const DEFAULT_HIDDEN_FILES = [/\/node_modules\//, /\/\.next/, /\/\.astro/, /\/\.git\//];
 
+// File type icons mapping
+const FILE_ICONS: Record<string, string> = {
+  // Code files
+  js: 'i-ph:file-js-duotone',
+  jsx: 'i-ph:file-js-duotone',
+  ts: 'i-ph:file-ts-duotone',
+  tsx: 'i-ph:file-ts-duotone',
+  html: 'i-ph:file-html-duotone',
+  css: 'i-ph:file-css-duotone',
+  scss: 'i-ph:file-css-duotone',
+  json: 'i-ph:brackets-curly-duotone',
+  md: 'i-ph:file-text-duotone',
+  // Config files
+  gitignore: 'i-ph:git-branch-duotone',
+  // Default
+  default: 'i-ph:file-duotone'
+};
+
 interface Props {
   files?: FileMap;
   selectedFile?: string;
@@ -39,7 +57,12 @@ export const FileTree = memo(
     const computedHiddenFiles = useMemo(() => [...DEFAULT_HIDDEN_FILES, ...(hiddenFiles ?? [])], [hiddenFiles]);
 
     const fileList = useMemo(() => {
-      return buildFileList(files, rootFolder, hideRoot, computedHiddenFiles);
+      try {
+        return buildFileList(files, rootFolder, hideRoot, computedHiddenFiles);
+      } catch (error) {
+        logger.error('Error building file list:', error);
+        return [];
+      }
     }, [files, rootFolder, hideRoot, computedHiddenFiles]);
 
     const [collapsedFolders, setCollapsedFolders] = useState(() => {
@@ -119,6 +142,25 @@ export const FileTree = memo(
       });
     };
 
+    // Handle folder selection if allowed
+    const handleFolderClick = (fullPath: string) => {
+      toggleCollapseState(fullPath);
+
+      if (allowFolderSelection) {
+        onFileSelect?.(fullPath);
+      }
+    };
+
+    // Render empty state when no files
+    if (filteredFileList.length === 0) {
+      return (
+        <div className={classNames('text-sm flex flex-col items-center justify-center h-full', className)}>
+          <div className="i-ph:folder-notch-open-duotone text-gray-400 w-12 h-12 mb-2"></div>
+          <p className="text-bolt-elements-item-contentDefault opacity-70">No files found</p>
+        </div>
+      );
+    }
+
     return (
       <div className={classNames('text-sm', className, 'overflow-y-auto')}>
         {filteredFileList.map((fileOrFolder) => {
@@ -144,7 +186,7 @@ export const FileTree = memo(
                   selected={allowFolderSelection && selectedFile === fileOrFolder.fullPath}
                   collapsed={collapsedFolders.has(fileOrFolder.fullPath)}
                   onClick={() => {
-                    toggleCollapseState(fileOrFolder.fullPath);
+                    handleFolderClick(fileOrFolder.fullPath);
                   }}
                 />
               );
@@ -178,8 +220,8 @@ function Folder({ folder: { depth, name }, collapsed, selected = false, onClick 
       })}
       depth={depth}
       iconClasses={classNames({
-        'i-ph:caret-right scale-98': collapsed,
-        'i-ph:caret-down scale-98': !collapsed,
+        'i-ph:folder-notch-duotone scale-98': collapsed,
+        'i-ph:folder-notch-open-duotone scale-98': !collapsed,
       })}
       onClick={onClick}
     >
@@ -196,6 +238,10 @@ interface FileProps {
 }
 
 function File({ file: { depth, name }, onClick, selected, unsavedChanges = false }: FileProps) {
+  // Get file extension for icon selection
+  const fileExtension = name.includes('.') ? name.split('.').pop()!.toLowerCase() : '';
+  const iconClass = FILE_ICONS[fileExtension] || FILE_ICONS.default;
+
   return (
     <NodeButton
       className={classNames('group', {
@@ -203,7 +249,7 @@ function File({ file: { depth, name }, onClick, selected, unsavedChanges = false
         'bg-bolt-elements-item-backgroundAccent text-bolt-elements-item-contentAccent': selected,
       })}
       depth={depth}
-      iconClasses={classNames('i-ph:file-duotone scale-98', {
+      iconClasses={classNames(iconClass, 'scale-98', {
         'group-hover:text-bolt-elements-item-contentActive': !selected,
       })}
       onClick={onClick}
@@ -214,7 +260,12 @@ function File({ file: { depth, name }, onClick, selected, unsavedChanges = false
         })}
       >
         <div className="flex-1 truncate pr-2">{name}</div>
-        {unsavedChanges && <span className="i-ph:circle-fill scale-68 shrink-0 text-orange-500" />}
+        {unsavedChanges && (
+          <span
+            className="i-ph:circle-fill scale-68 shrink-0 text-orange-500"
+            title="Unsaved changes"
+          />
+        )}
       </div>
     </NodeButton>
   );
@@ -267,6 +318,10 @@ function buildFileList(
   hideRoot: boolean,
   hiddenFiles: Array<string | RegExp>,
 ): Node[] {
+  if (!files || Object.keys(files).length === 0) {
+    return [];
+  }
+
   const folderPaths = new Set<string>();
   const fileList: Node[] = [];
 
@@ -343,70 +398,89 @@ function isHiddenFile(filePath: string, fileName: string, hiddenFiles: Array<str
  * This function organizes the nodes into a hierarchical structure based on their paths,
  * with folders appearing before files and all items sorted alphabetically within their level.
  *
- * @note This function mutates the given `nodeList` array for performance reasons.
- *
  * @param rootFolder - The path of the root folder to start the sorting from.
  * @param nodeList - The list of nodes to be sorted.
  *
  * @returns A new array of nodes sorted in depth-first order.
  */
 function sortFileList(rootFolder: string, nodeList: Node[], hideRoot: boolean): Node[] {
-  logger.trace('sortFileList');
+  try {
+    logger.trace('sortFileList');
 
-  const nodeMap = new Map<string, Node>();
-  const childrenMap = new Map<string, Node[]>();
-
-  // pre-sort nodes by name and type
-  nodeList.sort((a, b) => compareNodes(a, b));
-
-  for (const node of nodeList) {
-    nodeMap.set(node.fullPath, node);
-
-    const parentPath = node.fullPath.slice(0, node.fullPath.lastIndexOf('/'));
-
-    if (parentPath !== rootFolder.slice(0, rootFolder.lastIndexOf('/'))) {
-      if (!childrenMap.has(parentPath)) {
-        childrenMap.set(parentPath, []);
-      }
-
-      childrenMap.get(parentPath)?.push(node);
-    }
-  }
-
-  const sortedList: Node[] = [];
-
-  const depthFirstTraversal = (path: string): void => {
-    const node = nodeMap.get(path);
-
-    if (node) {
-      sortedList.push(node);
+    if (nodeList.length === 0) {
+      return [];
     }
 
-    const children = childrenMap.get(path);
+    const nodeMap = new Map<string, Node>();
+    const childrenMap = new Map<string, Node[]>();
 
-    if (children) {
-      for (const child of children) {
-        if (child.kind === 'folder') {
-          depthFirstTraversal(child.fullPath);
-        } else {
-          sortedList.push(child);
+    // pre-sort nodes by name and type
+    nodeList.sort((a, b) => compareNodes(a, b));
+
+    for (const node of nodeList) {
+      nodeMap.set(node.fullPath, node);
+
+      const parentPath = node.fullPath.slice(0, node.fullPath.lastIndexOf('/'));
+
+      if (parentPath !== rootFolder.slice(0, rootFolder.lastIndexOf('/'))) {
+        if (!childrenMap.has(parentPath)) {
+          childrenMap.set(parentPath, []);
         }
+
+        childrenMap.get(parentPath)?.push(node);
       }
     }
-  };
 
-  if (hideRoot) {
-    // if root is hidden, start traversal from its immediate children
-    const rootChildren = childrenMap.get(rootFolder) || [];
+    const sortedList: Node[] = [];
 
-    for (const child of rootChildren) {
-      depthFirstTraversal(child.fullPath);
+    const depthFirstTraversal = (path: string): void => {
+      const node = nodeMap.get(path);
+
+      if (node) {
+        sortedList.push(node);
+      }
+
+      const children = childrenMap.get(path);
+
+      if (children) {
+        // Ensure folders come before files at each level
+        const folders = children.filter(child => child.kind === 'folder');
+        const files = children.filter(child => child.kind === 'file');
+
+        // Process folders first (recursively)
+        for (const folder of folders) {
+          depthFirstTraversal(folder.fullPath);
+        }
+
+        // Then add files
+        sortedList.push(...files);
+      }
+    };
+
+    if (hideRoot) {
+      // if root is hidden, start traversal from its immediate children
+      const rootChildren = childrenMap.get(rootFolder) || [];
+
+      // Split into folders and files
+      const folders = rootChildren.filter(child => child.kind === 'folder');
+      const files = rootChildren.filter(child => child.kind === 'file');
+
+      // Process folders first
+      for (const folder of folders) {
+        depthFirstTraversal(folder.fullPath);
+      }
+
+      // Then add root-level files
+      sortedList.push(...files);
+    } else {
+      depthFirstTraversal(rootFolder);
     }
-  } else {
-    depthFirstTraversal(rootFolder);
-  }
 
-  return sortedList;
+    return sortedList;
+  } catch (error) {
+    logger.error('Error sorting file list:', error);
+    return nodeList; // Return unsorted list as fallback
+  }
 }
 
 function compareNodes(a: Node, b: Node): number {
