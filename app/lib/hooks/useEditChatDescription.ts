@@ -4,7 +4,7 @@ import { toast } from 'react-toastify';
 import {
   chatId as chatIdStore,
   description as descriptionStore,
-  db,
+  db as dbPromise,
   updateChatDescription,
   getMessages,
 } from '~/lib/persistence';
@@ -23,6 +23,7 @@ type EditChatDescriptionHook = {
   handleKeyDown: (event: React.KeyboardEvent<HTMLInputElement>) => Promise<void>;
   currentDescription: string;
   toggleEditMode: () => void;
+  dbAvailable: boolean | null;
 };
 
 /**
@@ -47,35 +48,58 @@ export function useEditChatDescription({
   const chatIdFromStore = useStore(chatIdStore);
   const [editing, setEditing] = useState(false);
   const [currentDescription, setCurrentDescription] = useState(initialDescription);
-
+  const [dbAvailable, setDbAvailable] = useState<boolean | null>(null);
   const [chatId, setChatId] = useState<string>();
+  const [dbInstance, setDbInstance] = useState<IDBDatabase | undefined>(undefined);
+
+  // Check database availability and initialize the database instance
+  useEffect(() => {
+    const initDb = async () => {
+      try {
+        const database = await dbPromise;
+        setDbAvailable(!!database);
+        setDbInstance(database);
+      } catch (error) {
+        console.error('Error initializing database:', error);
+        setDbAvailable(false);
+      }
+    };
+
+    initDb();
+  }, []);
 
   useEffect(() => {
     setChatId(customChatId || chatIdFromStore);
   }, [customChatId, chatIdFromStore]);
+
   useEffect(() => {
     setCurrentDescription(initialDescription);
   }, [initialDescription]);
 
-  const toggleEditMode = useCallback(() => setEditing((prev) => !prev), []);
+  const toggleEditMode = useCallback(() => {
+    if (!dbAvailable && !editing) {
+      toast.warning('Chat persistence is unavailable. Changes won\'t be saved.');
+    }
+    setEditing((prev) => !prev);
+  }, [dbAvailable, editing]);
 
   const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     setCurrentDescription(e.target.value);
   }, []);
 
   const fetchLatestDescription = useCallback(async () => {
-    if (!db || !chatId) {
+    if (!dbInstance || !chatId || !dbAvailable) {
       return initialDescription;
     }
 
     try {
-      const chat = await getMessages(db, chatId);
+      const chat = await getMessages(dbInstance, chatId);
       return chat?.description || initialDescription;
     } catch (error) {
       console.error('Failed to fetch latest description:', error);
       return initialDescription;
     }
-  }, [db, chatId, initialDescription]);
+  }, [dbInstance, chatId, initialDescription, dbAvailable]);
 
   const handleBlur = useCallback(async () => {
     const latestDescription = await fetchLatestDescription();
@@ -105,7 +129,7 @@ export function useEditChatDescription({
     }
 
     return true;
-  }, []);
+  }, [initialDescription, toggleEditMode]);
 
   const handleSubmit = useCallback(
     async (event: React.FormEvent) => {
@@ -115,18 +139,30 @@ export function useEditChatDescription({
         return;
       }
 
-      try {
-        if (!db) {
+      if (!dbAvailable) {
+        // Even if DB is not available, we can still update the UI state
+        if (syncWithGlobalStore) {
+          descriptionStore.set(currentDescription);
+          toast.info('Description updated in memory only (persistence unavailable)');
+        } else {
           toast.error('Chat persistence is not available');
-          return;
         }
+        toggleEditMode();
+        return;
+      }
 
+      try {
         if (!chatId) {
           toast.error('Chat Id is not available');
           return;
         }
 
-        await updateChatDescription(db, chatId, currentDescription);
+        if (!dbInstance) {
+          toast.error('Database is not available');
+          return;
+        }
+
+        await updateChatDescription(dbInstance, chatId, currentDescription);
 
         if (syncWithGlobalStore) {
           descriptionStore.set(currentDescription);
@@ -139,7 +175,7 @@ export function useEditChatDescription({
 
       toggleEditMode();
     },
-    [currentDescription, db, chatId, initialDescription, customChatId],
+    [currentDescription, dbInstance, chatId, dbAvailable, syncWithGlobalStore, toggleEditMode, isValidDescription],
   );
 
   const handleKeyDown = useCallback(
@@ -159,5 +195,6 @@ export function useEditChatDescription({
     handleKeyDown,
     currentDescription,
     toggleEditMode,
+    dbAvailable,
   };
 }

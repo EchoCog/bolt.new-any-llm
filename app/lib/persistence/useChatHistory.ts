@@ -8,10 +8,10 @@ import {
   getMessages,
   getNextId,
   getUrlId,
-  openDatabase,
   setMessages,
   duplicateChat,
   createChatFromMessages,
+  db as dbPromise
 } from './db';
 
 export interface ChatHistoryItem {
@@ -24,7 +24,22 @@ export interface ChatHistoryItem {
 
 const persistenceEnabled = !import.meta.env.VITE_DISABLE_PERSISTENCE;
 
-export const db = persistenceEnabled ? await openDatabase() : undefined;
+// Export a mutable reference that will be populated when the promise resolves
+export let db: IDBDatabase | undefined = undefined;
+
+// Initialize and resolve the database promise
+(async function initDb() {
+  if (persistenceEnabled) {
+    try {
+      db = await dbPromise;
+      if (!db) {
+        console.warn('Failed to initialize database after multiple attempts');
+      }
+    } catch (error) {
+      console.error('Error initializing database:', error);
+    }
+  }
+})();
 
 export const chatId = atom<string | undefined>(undefined);
 export const description = atom<string | undefined>(undefined);
@@ -37,19 +52,33 @@ export function useChatHistory() {
   const [initialMessages, setInitialMessages] = useState<Message[]>([]);
   const [ready, setReady] = useState<boolean>(false);
   const [urlId, setUrlId] = useState<string | undefined>();
+  const [dbReady, setDbReady] = useState<boolean>(false);
 
+  // Handle database initialization
   useEffect(() => {
-    if (!db) {
-      setReady(true);
-
-      if (persistenceEnabled) {
-        toast.error('Chat persistence is unavailable');
-      }
-
+    if (!persistenceEnabled) {
+      setDbReady(true);
       return;
     }
 
-    if (mixedId) {
+    dbPromise.then(database => {
+      setDbReady(true);
+      if (!database) {
+        toast.error('Chat persistence is unavailable. Using memory storage instead.');
+      }
+    });
+  }, []);
+
+  // Handle message fetching when DB is ready
+  useEffect(() => {
+    if (!dbReady) return;
+
+    if (!db && persistenceEnabled) {
+      setReady(true);
+      return;
+    }
+
+    if (mixedId && db) {
       getMessages(db, mixedId)
         .then((storedMessages) => {
           if (storedMessages && storedMessages.messages.length > 0) {
@@ -69,10 +98,13 @@ export function useChatHistory() {
           setReady(true);
         })
         .catch((error) => {
-          toast.error(error.message);
+          toast.error(`Failed to load chat: ${error.message}`);
+          setReady(true);
         });
+    } else {
+      setReady(true);
     }
-  }, []);
+  }, [mixedId, dbReady]);
 
   return {
     ready: !mixedId || ready,
@@ -82,30 +114,35 @@ export function useChatHistory() {
         return;
       }
 
-      const { firstArtifact } = workbenchStore;
+      try {
+        const { firstArtifact } = workbenchStore;
 
-      if (!urlId && firstArtifact?.id) {
-        const urlId = await getUrlId(db, firstArtifact.id);
+        if (!urlId && firstArtifact?.id) {
+          const urlId = await getUrlId(db, firstArtifact.id);
 
-        navigateChat(urlId);
-        setUrlId(urlId);
-      }
-
-      if (!description.get() && firstArtifact?.title) {
-        description.set(firstArtifact?.title);
-      }
-
-      if (initialMessages.length === 0 && !chatId.get()) {
-        const nextId = await getNextId(db);
-
-        chatId.set(nextId);
-
-        if (!urlId) {
-          navigateChat(nextId);
+          navigateChat(urlId);
+          setUrlId(urlId);
         }
-      }
 
-      await setMessages(db, chatId.get() as string, messages, urlId, description.get());
+        if (!description.get() && firstArtifact?.title) {
+          description.set(firstArtifact?.title);
+        }
+
+        if (initialMessages.length === 0 && !chatId.get()) {
+          const nextId = await getNextId(db);
+
+          chatId.set(nextId);
+
+          if (!urlId) {
+            navigateChat(nextId);
+          }
+        }
+
+        await setMessages(db, chatId.get() as string, messages, urlId, description.get());
+      } catch (error) {
+        console.error('Failed to store message history:', error);
+        toast.error('Failed to save chat history');
+      }
     },
     duplicateCurrentChat: async (listItemId: string) => {
       if (!db || (!mixedId && !listItemId)) {

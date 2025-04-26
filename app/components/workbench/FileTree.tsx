@@ -6,7 +6,7 @@ import { createScopedLogger, renderLogger } from '~/utils/logger';
 const logger = createScopedLogger('FileTree');
 
 const NODE_PADDING_LEFT = 8;
-const DEFAULT_HIDDEN_FILES = [/\/node_modules\//, /\/\.next/, /\/\.astro/];
+const DEFAULT_HIDDEN_FILES = [/\/node_modules\//, /\/\.next/, /\/\.astro/, /\/\.git\//];
 
 interface Props {
   files?: FileMap;
@@ -26,7 +26,7 @@ export const FileTree = memo(
     files = {},
     onFileSelect,
     selectedFile,
-    rootFolder,
+    rootFolder = '/',
     hideRoot = false,
     collapsed = false,
     allowFolderSelection = false,
@@ -48,12 +48,15 @@ export const FileTree = memo(
         : new Set<string>();
     });
 
+    // Handle changes in collapsed state or fileList
     useEffect(() => {
       if (collapsed) {
+        // When explicitly collapsed, close all folders
         setCollapsedFolders(new Set(fileList.filter((item) => item.kind === 'folder').map((item) => item.fullPath)));
         return;
       }
 
+      // Keep previously collapsed folders state when fileList changes
       setCollapsedFolders((prevCollapsed) => {
         const newCollapsed = new Set<string>();
 
@@ -67,26 +70,32 @@ export const FileTree = memo(
       });
     }, [fileList, collapsed]);
 
+    // Improved filteredFileList calculation
     const filteredFileList = useMemo(() => {
-      const list = [];
+      const list: Node[] = [];
 
-      let lastDepth = Number.MAX_SAFE_INTEGER;
+      // Track folders that are collapsed to filter out their children
+      const isCollapsed = (path: string): boolean => {
+        const segments = path.split('/').filter(Boolean);
+        let currentPath = '';
 
+        // Check if any parent folder is collapsed
+        for (let i = 0; i < segments.length; i++) {
+          currentPath += '/' + segments[i];
+          if (collapsedFolders.has(currentPath)) {
+            return true;
+          }
+        }
+
+        return false;
+      };
+
+      // Add visible nodes to the filtered list
       for (const fileOrFolder of fileList) {
-        const depth = fileOrFolder.depth;
+        const parentPath = fileOrFolder.fullPath.substring(0, fileOrFolder.fullPath.lastIndexOf('/'));
 
-        // if the depth is equal we reached the end of the collaped group
-        if (lastDepth === depth) {
-          lastDepth = Number.MAX_SAFE_INTEGER;
-        }
-
-        // ignore collapsed folders
-        if (collapsedFolders.has(fileOrFolder.fullPath)) {
-          lastDepth = Math.min(lastDepth, depth);
-        }
-
-        // ignore files and folders below the last collapsed folder
-        if (lastDepth < depth) {
+        // Skip if any parent folder is collapsed (except for folders themselves)
+        if (fileOrFolder.kind === 'file' && isCollapsed(parentPath)) {
           continue;
         }
 

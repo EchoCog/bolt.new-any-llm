@@ -154,10 +154,16 @@ export const SettingsWindow = ({ open, onClose }: SettingsProps) => {
     try {
       setIsDeleting(true);
 
-      const allChats = await getAll(db);
+      const database = await db;
+      if (!database) {
+        toast.error('Database is not available');
+        return;
+      }
+
+      const allChats = await getAll(database);
 
       // Delete all chats one by one
-      await Promise.all(allChats.map((chat) => deleteById(db!, chat.id)));
+      await Promise.all(allChats.map((chat) => deleteById(database, chat.id)));
 
       toast.success('All chats deleted successfully');
       navigate('/', { replace: true });
@@ -176,7 +182,13 @@ export const SettingsWindow = ({ open, onClose }: SettingsProps) => {
     }
 
     try {
-      const allChats = await getAll(db);
+      const database = await db;
+      if (!database) {
+        toast.error('Database is not available');
+        return;
+      }
+
+      const allChats = await getAll(database);
       const exportData = {
         chats: allChats,
         exportDate: new Date().toISOString(),

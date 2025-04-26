@@ -5,7 +5,7 @@ import { Dialog, DialogButton, DialogDescription, DialogRoot, DialogTitle } from
 import { ThemeSwitch } from '~/components/ui/ThemeSwitch';
 import { SettingsWindow } from '~/components/settings/SettingsWindow';
 import { SettingsButton } from '~/components/ui/SettingsButton';
-import { db, deleteById, getAll, chatId, type ChatHistoryItem, useChatHistory } from '~/lib/persistence';
+import { db as dbPromise, deleteById, getAll, chatId, type ChatHistoryItem, useChatHistory } from '~/lib/persistence';
 import { cubicEasingFn } from '~/utils/easings';
 import { logger } from '~/utils/logger';
 import { HistoryItem } from './HistoryItem';
@@ -42,40 +42,66 @@ export const Menu = () => {
   const [open, setOpen] = useState(false);
   const [dialogContent, setDialogContent] = useState<DialogContent>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [dbAvailable, setDbAvailable] = useState<boolean | null>(null);
+  const [dbInstance, setDbInstance] = useState<IDBDatabase | undefined>(undefined);
 
   const { filteredItems: filteredList, handleSearchChange } = useSearchFilter({
     items: list,
     searchFields: ['description'],
   });
 
-  const loadEntries = useCallback(() => {
-    if (db) {
-      getAll(db)
-        .then((list) => list.filter((item) => item.urlId && item.description))
-        .then(setList)
-        .catch((error) => toast.error(error.message));
-    }
+  // Check database availability and get the instance
+  useEffect(() => {
+    const initDb = async () => {
+      try {
+        const db = await dbPromise;
+        setDbAvailable(!!db);
+        setDbInstance(db);
+      } catch (error) {
+        logger.error('Error initializing database:', error);
+        setDbAvailable(false);
+      }
+    };
+
+    initDb();
   }, []);
 
-  const deleteItem = useCallback((event: React.UIEvent, item: ChatHistoryItem) => {
+  const loadEntries = useCallback(async () => {
+    if (!dbAvailable || !dbInstance) {
+      return;
+    }
+
+    try {
+      const entries = await getAll(dbInstance);
+      const validEntries = entries.filter((item) => item.urlId && item.description);
+      setList(validEntries);
+    } catch (error) {
+      logger.error('Failed to load chat history:', error);
+      toast.error('Failed to load chat history');
+    }
+  }, [dbAvailable, dbInstance]);
+
+  const deleteItem = useCallback(async (event: React.UIEvent, item: ChatHistoryItem) => {
     event.preventDefault();
 
-    if (db) {
-      deleteById(db, item.id)
-        .then(() => {
-          loadEntries();
-
-          if (chatId.get() === item.id) {
-            // hard page navigation to clear the stores
-            window.location.pathname = '/';
-          }
-        })
-        .catch((error) => {
-          toast.error('Failed to delete conversation');
-          logger.error(error);
-        });
+    if (!dbInstance) {
+      toast.error('Chat persistence is unavailable');
+      return;
     }
-  }, []);
+
+    try {
+      await deleteById(dbInstance, item.id);
+      loadEntries();
+
+      if (chatId.get() === item.id) {
+        // hard page navigation to clear the stores
+        window.location.pathname = '/';
+      }
+    } catch (error) {
+      toast.error('Failed to delete conversation');
+      logger.error(error);
+    }
+  }, [dbInstance, loadEntries]);
 
   const closeDialog = () => {
     setDialogContent(null);
@@ -85,7 +111,7 @@ export const Menu = () => {
     if (open) {
       loadEntries();
     }
-  }, [open]);
+  }, [open, loadEntries]);
 
   useEffect(() => {
     const enterThreshold = 40;
@@ -114,8 +140,13 @@ export const Menu = () => {
   };
 
   const handleDuplicate = async (id: string) => {
-    await duplicateCurrentChat(id);
-    loadEntries(); // Reload the list after duplication
+    try {
+      await duplicateCurrentChat(id);
+      loadEntries(); // Reload the list after duplication
+    } catch (error) {
+      logger.error('Failed to duplicate chat:', error);
+      toast.error('Failed to duplicate chat');
+    }
   };
 
   return (
@@ -150,7 +181,12 @@ export const Menu = () => {
         </div>
         <div className="text-bolt-elements-textPrimary font-medium pl-6 pr-5 my-2">Your Chats</div>
         <div className="flex-1 overflow-auto pl-4 pr-5 pb-5">
-          {filteredList.length === 0 && (
+          {dbAvailable === false && (
+            <div className="pl-2 text-bolt-elements-textTertiary">
+              Chat persistence is unavailable. Your chats won't be saved.
+            </div>
+          )}
+          {dbAvailable !== false && filteredList.length === 0 && (
             <div className="pl-2 text-bolt-elements-textTertiary">
               {list.length === 0 ? 'No previous conversations' : 'No matches found'}
             </div>

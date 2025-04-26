@@ -113,6 +113,121 @@ export class FilesStore {
     }
   }
 
+  /**
+   * Restores files from persisted storage to the WebContainer filesystem
+   * @param savedFiles - Files loaded from persistence storage
+   */
+  async restoreFiles(savedFiles: FileMap) {
+    try {
+      logger.info('Restoring files from persistence');
+      const webcontainer = await this.#webcontainer;
+      let restoredCount = 0;
+      let errorCount = 0;
+
+      // First, create all necessary directories
+      const allDirectories = new Set<string>();
+
+      for (const [filePath] of Object.entries(savedFiles)) {
+        const relativePath = this.#getRelativePath(filePath, webcontainer.workdir);
+        if (!relativePath) continue;
+
+        const dirPath = nodePath.dirname(relativePath);
+        if (dirPath !== '.') {
+          allDirectories.add(dirPath);
+
+          // Add all parent directories too
+          const segments = dirPath.split('/');
+          let currentPath = '';
+          for (const segment of segments) {
+            if (!segment) continue;
+            currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+            allDirectories.add(currentPath);
+          }
+        }
+      }
+
+      // Create directories in order of path depth (shortest first)
+      const sortedDirs = Array.from(allDirectories).sort((a, b) =>
+        a.split('/').length - b.split('/').length
+      );
+
+      for (const dir of sortedDirs) {
+        try {
+          await webcontainer.fs.mkdir(dir, { recursive: false });
+          logger.info(`Created directory: ${dir}`);
+        } catch (err: any) {
+          // Ignore if directory already exists
+          if (!err.toString().includes('EEXIST')) {
+            logger.warn(`Failed to create directory ${dir}: ${err}`);
+          }
+        }
+      }
+
+      // Then process each file
+      for (const [filePath, dirent] of Object.entries(savedFiles)) {
+        // Skip if not a file or is binary
+        if (!dirent || dirent.type !== 'file' || dirent.isBinary) {
+          continue;
+        }
+
+        try {
+          const relativePath = this.#getRelativePath(filePath, webcontainer.workdir);
+          if (!relativePath) {
+            logger.warn(`Invalid file path: ${filePath}`);
+            errorCount++;
+            continue;
+          }
+
+          // Write file to the filesystem
+          await webcontainer.fs.writeFile(relativePath, dirent.content);
+          restoredCount++;
+
+          // We don't need to update the files map directly here
+          // The file system watcher will catch the changes and update the state
+        } catch (fileErr) {
+          logger.error(`Failed to restore file ${filePath}:`, fileErr);
+          errorCount++;
+        }
+      }
+
+      logger.info(`Files restoration complete: ${restoredCount} files restored, ${errorCount} errors`);
+      return restoredCount;
+    } catch (error) {
+      logger.error('Failed to restore files:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get a relative path that works correctly with WebContainer
+   */
+  #getRelativePath(filePath: string, workdir: string): string | null {
+    try {
+      // Handle case where filePath already includes workdir
+      if (filePath.startsWith(workdir)) {
+        return filePath.slice(workdir.length).replace(/^\/+/, '');
+      }
+
+      // Handle case where filePath is already relative
+      if (!filePath.startsWith('/')) {
+        return filePath;
+      }
+
+      // Normal relative path calculation
+      const relativePath = nodePath.relative(workdir, filePath);
+
+      // Ensure we don't have path traversal issues
+      if (relativePath.startsWith('..')) {
+        return null;
+      }
+
+      return relativePath;
+    } catch (error) {
+      logger.error('Error calculating relative path:', error);
+      return null;
+    }
+  }
+
   async #init() {
     const webcontainer = await this.#webcontainer;
 
@@ -207,7 +322,7 @@ function isBinaryFile(buffer: Uint8Array | undefined) {
 
 /**
  * Converts a `Uint8Array` into a Node.js `Buffer` by copying the prototype.
- * The goal is to  avoid expensive copies. It does create a new typed array
+ * The goal is to avoid expensive copies. It does create a new typed array
  * but that's generally cheap as long as it uses the same underlying
  * array buffer.
  */

@@ -15,6 +15,7 @@ import { Octokit, type RestEndpointMethodTypes } from '@octokit/rest';
 import * as nodePath from 'node:path';
 import { extractRelativePath } from '~/utils/diff';
 import { description } from '~/lib/persistence';
+import { loadFilesFromStorage, saveFilesToStorage } from '~/lib/persistence/filePersistence';
 
 export interface ArtifactState {
   id: string;
@@ -44,6 +45,10 @@ export class WorkbenchStore {
   modifiedFiles = new Set<string>();
   artifactIdList: string[] = [];
   #globalExecutionQueue = Promise.resolve();
+  #hasLoadedFromStorage = false;
+  #autoSaveTimerId: number | undefined;
+  #autoSaveInterval = 2 * 60 * 1000;
+
   constructor() {
     if (import.meta.hot) {
       import.meta.hot.data.artifacts = this.artifacts;
@@ -51,6 +56,47 @@ export class WorkbenchStore {
       import.meta.hot.data.showWorkbench = this.showWorkbench;
       import.meta.hot.data.currentView = this.currentView;
     }
+
+    this.setupAutoSave();
+    this.loadFilesFromStorage();
+  }
+
+  setupAutoSave() {
+    if (this.#autoSaveTimerId) {
+      clearInterval(this.#autoSaveTimerId);
+    }
+
+    this.#autoSaveTimerId = window.setInterval(() => {
+      const files = this.files.get();
+      if (Object.keys(files).length > 0) {
+        saveFilesToStorage(files, 'Auto-saved files').catch(console.error);
+      }
+    }, this.#autoSaveInterval);
+  }
+
+  async loadFilesFromStorage() {
+    try {
+      if (this.#hasLoadedFromStorage) {
+        return;
+      }
+
+      const savedFiles = await loadFilesFromStorage();
+      if (savedFiles && Object.keys(savedFiles).length > 0) {
+        this.#filesStore.restoreFiles(savedFiles);
+        this.#hasLoadedFromStorage = true;
+      }
+    } catch (error) {
+      console.error('Failed to load files from storage:', error);
+    }
+  }
+
+  async saveFilesToStorage(description?: string) {
+    const files = this.files.get();
+    if (Object.keys(files).length === 0) {
+      return false;
+    }
+
+    return saveFilesToStorage(files, description || 'Manually saved files');
   }
 
   addToExecutionQueue(callback: () => Promise<void>) {
@@ -107,7 +153,6 @@ export class WorkbenchStore {
     this.#editorStore.setDocuments(files);
 
     if (this.#filesStore.filesCount > 0 && this.currentDocument.get() === undefined) {
-      // we find the first file and select it
       for (const [filePath, dirent] of Object.entries(files)) {
         if (dirent?.type === 'file') {
           this.setSelectedFile(filePath);
@@ -194,6 +239,7 @@ export class WorkbenchStore {
     }
 
     await this.saveFile(currentDocument.filePath);
+    await this.saveFilesToStorage('User saved files');
   }
 
   resetCurrentDocument() {
@@ -217,6 +263,8 @@ export class WorkbenchStore {
     for (const filePath of this.unsavedFiles.get()) {
       await this.saveFile(filePath);
     }
+
+    await this.saveFilesToStorage('All files saved');
   }
 
   getFileModifcations() {
@@ -262,9 +310,8 @@ export class WorkbenchStore {
   }
   addAction(data: ActionCallbackData) {
     this._addAction(data);
-
-    // this.addToExecutionQueue(()=>this._addAction(data))
   }
+
   async _addAction(data: ActionCallbackData) {
     const { messageId } = data;
 
@@ -284,6 +331,7 @@ export class WorkbenchStore {
       this.addToExecutionQueue(() => this._runAction(data, isStreaming));
     }
   }
+
   async _runAction(data: ActionCallbackData, isStreaming: boolean = false) {
     const { messageId } = data;
 
@@ -316,9 +364,10 @@ export class WorkbenchStore {
       if (!isStreaming) {
         await artifact.runner.runAction(data);
         this.resetAllFileModifications();
+        await this.saveFilesToStorage();
       }
     } else {
-      await artifact.runner.runAction(data);
+      await artifact.runner.runAction(data, isStreaming);
     }
   }
 
@@ -331,10 +380,8 @@ export class WorkbenchStore {
     const zip = new JSZip();
     const files = this.files.get();
 
-    // Get the project name from the description input, or use a default name
     const projectName = (description.value ?? 'project').toLocaleLowerCase().split(' ').join('_');
 
-    // Generate a simple 6-character hash based on the current timestamp
     const timestampHash = Date.now().toString(36).slice(-6);
     const uniqueProjectName = `${projectName}_${timestampHash}`;
 
@@ -342,10 +389,8 @@ export class WorkbenchStore {
       if (dirent?.type === 'file' && !dirent.isBinary) {
         const relativePath = extractRelativePath(filePath);
 
-        // split the path into segments
         const pathSegments = relativePath.split('/');
 
-        // if there's more than one segment, we need to create folders
         if (pathSegments.length > 1) {
           let currentFolder = zip;
 
@@ -354,13 +399,11 @@ export class WorkbenchStore {
           }
           currentFolder.file(pathSegments[pathSegments.length - 1], dirent.content);
         } else {
-          // if there's only one segment, it's a file in the root
           zip.file(relativePath, dirent.content);
         }
       }
     }
 
-    // Generate the zip file and save it
     const content = await zip.generateAsync({ type: 'blob' });
     saveAs(content, `${uniqueProjectName}.zip`);
   }
@@ -379,12 +422,10 @@ export class WorkbenchStore {
           currentHandle = await currentHandle.getDirectoryHandle(pathSegments[i], { create: true });
         }
 
-        // create or get the file
         const fileHandle = await currentHandle.getFileHandle(pathSegments[pathSegments.length - 1], {
           create: true,
         });
 
-        // write the file content
         const writable = await fileHandle.createWritable();
         await writable.write(dirent.content);
         await writable.close();
@@ -398,7 +439,6 @@ export class WorkbenchStore {
 
   async pushToGitHub(repoName: string, githubUsername: string, ghToken: string) {
     try {
-      // Get the GitHub auth token from environment variables
       const githubToken = ghToken;
 
       const owner = githubUsername;
@@ -407,10 +447,8 @@ export class WorkbenchStore {
         throw new Error('GitHub token is not set in environment variables');
       }
 
-      // Initialize Octokit with the auth token
       const octokit = new Octokit({ auth: githubToken });
 
-      // Check if the repository already exists before creating it
       let repo: RestEndpointMethodTypes['repos']['get']['response']['data'];
 
       try {
@@ -418,7 +456,6 @@ export class WorkbenchStore {
         repo = resp.data;
       } catch (error) {
         if (error instanceof Error && 'status' in error && error.status === 404) {
-          // Repository doesn't exist, so create a new one
           const { data: newRepo } = await octokit.repos.createForAuthenticatedUser({
             name: repoName,
             private: false,
@@ -427,18 +464,16 @@ export class WorkbenchStore {
           repo = newRepo;
         } else {
           console.log('cannot create repo!');
-          throw error; // Some other error occurred
+          throw error;
         }
       }
 
-      // Get all files
       const files = this.files.get();
 
       if (!files || Object.keys(files).length === 0) {
         throw new Error('No files found to push');
       }
 
-      // Create blobs for each file
       const blobs = await Promise.all(
         Object.entries(files).map(async ([filePath, dirent]) => {
           if (dirent?.type === 'file' && dirent.content) {
@@ -455,21 +490,19 @@ export class WorkbenchStore {
         }),
       );
 
-      const validBlobs = blobs.filter(Boolean); // Filter out any undefined blobs
+      const validBlobs = blobs.filter(Boolean);
 
       if (validBlobs.length === 0) {
         throw new Error('No valid files to push');
       }
 
-      // Get the latest commit SHA (assuming main branch, update dynamically if needed)
       const { data: ref } = await octokit.git.getRef({
         owner: repo.owner.login,
         repo: repo.name,
-        ref: `heads/${repo.default_branch || 'main'}`, // Handle dynamic branch
+        ref: `heads/${repo.default_branch || 'main'}`,
       });
       const latestCommitSha = ref.object.sha;
 
-      // Create a new tree
       const { data: newTree } = await octokit.git.createTree({
         owner: repo.owner.login,
         repo: repo.name,
@@ -482,7 +515,6 @@ export class WorkbenchStore {
         })),
       });
 
-      // Create a new commit
       const { data: newCommit } = await octokit.git.createCommit({
         owner: repo.owner.login,
         repo: repo.name,
@@ -491,11 +523,10 @@ export class WorkbenchStore {
         parents: [latestCommitSha],
       });
 
-      // Update the reference
       await octokit.git.updateRef({
         owner: repo.owner.login,
         repo: repo.name,
-        ref: `heads/${repo.default_branch || 'main'}`, // Handle dynamic branch
+        ref: `heads/${repo.default_branch || 'main'}`,
         sha: newCommit.sha,
       });
 

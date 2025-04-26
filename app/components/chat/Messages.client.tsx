@@ -27,16 +27,23 @@ export const Messages = React.forwardRef<HTMLDivElement, MessagesProps>((props: 
   };
 
   const handleFork = async (messageId: string) => {
+    if (!db) {
+      toast.warning('Chat persistence is not available. Forking is disabled.');
+      return;
+    }
+
     try {
-      if (!db || !chatId.get()) {
-        toast.error('Chat persistence is not available');
+      const currentChatId = chatId.get();
+      if (!currentChatId) {
+        toast.error('No active chat to fork');
         return;
       }
 
-      const urlId = await forkChat(db, chatId.get()!, messageId);
-      window.location.href = `/chat/${urlId}`;
+      const newChatId = await forkChat(db, currentChatId, messageId);
+      window.location.href = `/chat/${newChatId}`;
     } catch (error) {
-      toast.error('Failed to fork chat: ' + (error as Error).message);
+      console.error('Error forking chat:', error);
+      toast.error('Failed to fork chat');
     }
   };
 
