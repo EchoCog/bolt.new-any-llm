@@ -8,6 +8,7 @@ import { WORK_DIR } from '~/utils/constants';
 import { computeFileModifications } from '~/utils/diff';
 import { createScopedLogger } from '~/utils/logger';
 import { unreachable } from '~/utils/unreachable';
+import { toast } from 'react-toastify';
 
 const logger = createScopedLogger('FilesStore');
 
@@ -46,6 +47,22 @@ export class FilesStore {
    * Map of files that matches the state of WebContainer.
    */
   files: MapStore<FileMap> = import.meta.hot?.data.files ?? map({});
+
+  /**
+   * Flag to track if filesystem watcher is initialized
+   */
+  #isWatcherInitialized = false;
+
+  /**
+   * Flag to track if an initial scan is in progress
+   */
+  #isInitialScanInProgress = false;
+
+  /**
+   * Number of initialization attempts
+   */
+  #initAttempts = 0;
+  #maxInitAttempts = 3;
 
   get filesCount() {
     return this.#size;
@@ -93,14 +110,25 @@ export class FilesStore {
       const oldContent = this.getFile(filePath)?.content;
 
       if (!oldContent) {
-        unreachable('Expected content to be defined');
+        logger.warn(`No existing content found for ${filePath}, creating new file`);
+      } else if (!this.#modifiedFiles.has(filePath)) {
+        this.#modifiedFiles.set(filePath, oldContent);
+      }
+
+      // Ensure parent directory exists
+      const dirPath = nodePath.dirname(relativePath);
+      if (dirPath !== '.') {
+        try {
+          await webcontainer.fs.mkdir(dirPath, { recursive: true });
+        } catch (dirErr: any) {
+          // Ignore if directory already exists
+          if (!dirErr.toString().includes('EEXIST')) {
+            logger.warn(`Failed to create directory ${dirPath}: ${dirErr}`);
+          }
+        }
       }
 
       await webcontainer.fs.writeFile(relativePath, content);
-
-      if (!this.#modifiedFiles.has(filePath)) {
-        this.#modifiedFiles.set(filePath, oldContent);
-      }
 
       // we immediately update the file and don't rely on the `change` event coming from the watcher
       this.files.setKey(filePath, { type: 'file', content, isBinary: false });
@@ -108,7 +136,6 @@ export class FilesStore {
       logger.info('File updated');
     } catch (error) {
       logger.error('Failed to update file content\n\n', error);
-
       throw error;
     }
   }
@@ -119,10 +146,16 @@ export class FilesStore {
    */
   async restoreFiles(savedFiles: FileMap) {
     try {
+      if (!savedFiles || Object.keys(savedFiles).length === 0) {
+        logger.warn('No saved files to restore');
+        return 0;
+      }
+
       logger.info('Restoring files from persistence');
       const webcontainer = await this.#webcontainer;
       let restoredCount = 0;
       let errorCount = 0;
+      let retryCount = 0;
 
       // First, create all necessary directories
       const allDirectories = new Set<string>();
@@ -154,7 +187,7 @@ export class FilesStore {
       for (const dir of sortedDirs) {
         try {
           await webcontainer.fs.mkdir(dir, { recursive: false });
-          logger.info(`Created directory: ${dir}`);
+          logger.debug(`Created directory: ${dir}`);
         } catch (err: any) {
           // Ignore if directory already exists
           if (!err.toString().includes('EEXIST')) {
@@ -163,37 +196,64 @@ export class FilesStore {
         }
       }
 
-      // Then process each file
-      for (const [filePath, dirent] of Object.entries(savedFiles)) {
-        // Skip if not a file or is binary
-        if (!dirent || dirent.type !== 'file' || dirent.isBinary) {
-          continue;
+      // Create a list of files to restore
+      const filesToRestore = Object.entries(savedFiles).filter(
+        ([_, dirent]) => dirent?.type === 'file' && !dirent.isBinary
+      );
+
+      // Try up to 3 attempts for each file with increasing delays
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+          const failedCount = errorCount;
+          if (failedCount === 0) break; // No errors, no need for retry
+
+          logger.info(`Retry attempt ${attempt}: waiting before retrying ${failedCount} failed files`);
+          await new Promise(resolve => setTimeout(resolve, attempt * 500)); // Increasing delay
+          errorCount = 0; // Reset error count for this attempt
         }
 
-        try {
-          const relativePath = this.#getRelativePath(filePath, webcontainer.workdir);
-          if (!relativePath) {
-            logger.warn(`Invalid file path: ${filePath}`);
-            errorCount++;
+        for (const [filePath, dirent] of filesToRestore) {
+          // Skip already restored files
+          if (this.getFile(filePath)) {
             continue;
           }
 
-          // Write file to the filesystem
-          await webcontainer.fs.writeFile(relativePath, dirent.content);
-          restoredCount++;
+          try {
+            const relativePath = this.#getRelativePath(filePath, webcontainer.workdir);
+            if (!relativePath) {
+              logger.warn(`Invalid file path: ${filePath}`);
+              errorCount++;
+              continue;
+            }
 
-          // We don't need to update the files map directly here
-          // The file system watcher will catch the changes and update the state
-        } catch (fileErr) {
-          logger.error(`Failed to restore file ${filePath}:`, fileErr);
-          errorCount++;
+            // Write file to the filesystem
+            await webcontainer.fs.writeFile(relativePath, (dirent as File).content);
+            restoredCount++;
+
+            // Also update our internal state directly in case the watcher doesn't catch it
+            this.files.setKey(filePath, dirent);
+          } catch (fileErr) {
+            // Only count as error if this is the last attempt
+            if (attempt === 2) {
+              logger.error(`Failed to restore file ${filePath} after multiple attempts:`, fileErr);
+              errorCount++;
+            } else {
+              logger.warn(`Attempt ${attempt + 1} failed for ${filePath}, will retry:`, fileErr);
+              retryCount++;
+            }
+          }
         }
       }
 
-      logger.info(`Files restoration complete: ${restoredCount} files restored, ${errorCount} errors`);
+      if (errorCount > 0) {
+        toast.warn(`Some files could not be restored (${errorCount}/${filesToRestore.length})`);
+      }
+
+      logger.info(`Files restoration complete: ${restoredCount} files restored, ${errorCount} errors, ${retryCount} retries`);
       return restoredCount;
     } catch (error) {
       logger.error('Failed to restore files:', error);
+      toast.error('Error restoring files');
       throw error;
     }
   }
@@ -229,12 +289,124 @@ export class FilesStore {
   }
 
   async #init() {
-    const webcontainer = await this.#webcontainer;
+    if (this.#initAttempts >= this.#maxInitAttempts) {
+      logger.error('Max initialization attempts reached, giving up');
+      return;
+    }
 
-    webcontainer.internal.watchPaths(
-      { include: [`${WORK_DIR}/**`], exclude: ['**/node_modules', '.git'], includeContent: true },
-      bufferWatchEvents(100, this.#processEventBuffer.bind(this)),
-    );
+    this.#initAttempts++;
+
+    try {
+      const webcontainer = await this.#webcontainer;
+
+      // Prevent multiple initialization attempts for same session
+      if (this.#isWatcherInitialized) {
+        return;
+      }
+
+      logger.info('Initializing filesystem watcher');
+
+      // Set up the watcher
+      const unsubscribe = webcontainer.internal.watchPaths(
+        { include: [`${WORK_DIR}/**`], exclude: ['**/node_modules', '.git'], includeContent: true },
+        bufferWatchEvents(100, this.#processEventBuffer.bind(this)),
+      );
+
+      this.#isWatcherInitialized = true;
+
+      // Immediately scan existing files instead of waiting for watcher events
+      await this.scanExistingFiles();
+
+      // For hot reloading scenarios, clean up the watcher when module is replaced
+      if (import.meta.hot) {
+        import.meta.hot.data.isWatcherInitialized = this.#isWatcherInitialized;
+        import.meta.hot.dispose(() => {
+          unsubscribe();
+        });
+      }
+    } catch (error) {
+      logger.error('Failed to initialize filesystem watcher:', error);
+      // Instead of failing completely, retry after a delay
+      setTimeout(() => this.#init(), 1000);
+    }
+  }
+
+  /**
+   * Directly scan the WebContainer filesystem to find existing files
+   * This ensures we don't depend solely on the watcher for initial file discovery
+   */
+  async scanExistingFiles() {
+    if (this.#isInitialScanInProgress) {
+      return;
+    }
+
+    this.#isInitialScanInProgress = true;
+
+    try {
+      logger.info('Scanning WebContainer filesystem for existing files');
+      const webcontainer = await this.#webcontainer;
+
+      // Scan the work directory recursively
+      await this.scanDirectory(WORK_DIR, webcontainer);
+
+      logger.info(`Initial file scan complete: found ${this.#size} files`);
+    } catch (error) {
+      logger.error('Error during initial file scan:', error);
+    } finally {
+      this.#isInitialScanInProgress = false;
+    }
+  }
+
+  /**
+   * Recursively scan a directory to find all files and folders
+   */
+  async scanDirectory(directory: string, webcontainer: WebContainer) {
+    try {
+      const entries = await webcontainer.fs.readdir(directory, { withFileTypes: true });
+
+      // First add this directory itself (unless it's the work directory)
+      if (directory !== WORK_DIR) {
+        this.files.setKey(directory, { type: 'folder' });
+      }
+
+      for (const entry of entries) {
+        const fullPath = `${directory}/${entry.name}`;
+
+        // Skip node_modules and .git
+        if (entry.name === 'node_modules' || entry.name === '.git') {
+          continue;
+        }
+
+        if (entry.isDirectory()) {
+          // Add directory
+          this.files.setKey(fullPath, { type: 'folder' });
+
+          // Recurse into subdirectory
+          await this.scanDirectory(fullPath, webcontainer);
+        } else {
+          try {
+            // Read file content
+            const buffer = await webcontainer.fs.readFile(fullPath);
+
+            // Process the file
+            const isBinary = isBinaryFile(buffer);
+            let content = '';
+
+            if (!isBinary) {
+              content = this.#decodeFileContent(buffer);
+            }
+
+            // Add to files store
+            this.files.setKey(fullPath, { type: 'file', content, isBinary });
+            this.#size++;
+          } catch (fileErr) {
+            logger.warn(`Failed to read file ${fullPath}:`, fileErr);
+          }
+        }
+      }
+    } catch (error) {
+      logger.warn(`Error scanning directory ${directory}:`, error);
+    }
   }
 
   #processEventBuffer(events: Array<[events: PathWatcherEvent[]]>) {
@@ -253,7 +425,7 @@ export class FilesStore {
         case 'remove_dir': {
           this.files.setKey(sanitizedPath, undefined);
 
-          for (const [direntPath] of Object.entries(this.files)) {
+          for (const [direntPath] of Object.entries(this.files.get())) {
             if (direntPath.startsWith(sanitizedPath)) {
               this.files.setKey(direntPath, undefined);
             }
@@ -306,8 +478,15 @@ export class FilesStore {
     try {
       return utf8TextDecoder.decode(buffer);
     } catch (error) {
-      console.log(error);
-      return '';
+      logger.warn('Error decoding file content:', error);
+      // Try fallback decoding methods for non-UTF8 text files
+      try {
+        // Try with ignoring encoding errors
+        return new TextDecoder('utf-8', { fatal: false }).decode(buffer);
+      } catch (fallbackError) {
+        logger.error('All decoding methods failed:', fallbackError);
+        return '';
+      }
     }
   }
 }

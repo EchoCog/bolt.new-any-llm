@@ -1,73 +1,89 @@
-import type { WebContainer } from '@webcontainer/api';
-import { WORK_DIR } from '~/utils/constants';
+import { WebContainer } from '@webcontainer/api';
+import { createScopedLogger } from '../../utils/logger';
+import { PROJECT_TEMPLATES, type ProjectTemplate } from '../../utils/projectCommands';
+
+const logger = createScopedLogger('WebContainer:init-fs');
 
 /**
- * Initializes the file system with basic files to get started
+ * Initialize the WebContainer file system with sample files
  */
-export async function initializeFileSystem(webcontainerInstance: WebContainer): Promise<void> {
-  // Create some sample files to get the file manager started
-  const files = {
-    'index.html': `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>My Project</title>
-  <link rel="stylesheet" href="style.css">
-</head>
-<body>
-  <h1>Welcome to Bolt.new</h1>
-  <p>This is a sample project to help you get started with the file manager.</p>
-  <script src="script.js"></script>
-</body>
-</html>`,
-    'style.css': `body {
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  max-width: 800px;
-  margin: 0 auto;
-  padding: 20px;
-  line-height: 1.6;
+export async function initializeFileSystem(instance: WebContainer) {
+  logger.info('Initializing file system');
+  const isDevMode = import.meta.env.DEV === true;
+
+  try {
+    // Ensure workdir exists
+    await instance.fs.mkdir('/workdir', { recursive: true }).catch(err => {
+      // Directory might already exist in dev mode due to HMR
+      if (!isDevMode || !err.toString().includes('already exists')) {
+        throw err;
+      }
+    });
+
+    // In development mode, carefully handle file operations to avoid conflicts
+    if (isDevMode) {
+      try {
+        // Check if we already have files from a previous initialization
+        const files = await instance.fs.readdir('/workdir').catch(() => []);
+        if (files && files.length > 0) {
+          logger.info('Files already exist in workdir, preserving existing file system in dev mode');
+
+          // Create a simple marker file to verify file system is responsive
+          await instance.fs.writeFile('/workdir/.dev-mode-initialized', new Date().toISOString());
+
+          return; // Skip initialization to preserve existing files
+        }
+      } catch (err) {
+        logger.warn('Error checking for existing files in dev mode:', err);
+        // Continue with initialization
+      }
+    }
+
+    // Create initial files from a template
+    await createInitialFiles(instance);
+
+    logger.info('File system initialization completed successfully');
+  } catch (error) {
+    logger.error('Failed to initialize file system:', error);
+    throw error;
+  }
 }
 
-h1 {
-  color: #2563eb;
-}`,
-    'script.js': `// This is a sample JavaScript file
-console.log('Hello from Bolt.new!');
+async function createInitialFiles(instance: WebContainer) {
+  try {
+    // Use the Python template as the default starter project
+    const template = PROJECT_TEMPLATES.find(t => t.id === 'python') || PROJECT_TEMPLATES[0];
 
-document.addEventListener('DOMContentLoaded', () => {
-  console.log('DOM fully loaded and parsed');
-});`,
-    'README.md': `# My Project
-
-This is a sample project created in the Bolt.new file manager.
-
-## Getting Started
-
-1. Edit the files in the file manager
-2. Ask Bolt.new AI for help with coding tasks
-3. Run your project by using the terminal
-
-## File Structure
-
-- \`index.html\` - The main HTML file
-- \`style.css\` - CSS styles for the project
-- \`script.js\` - JavaScript code
-- \`README.md\` - This documentation file
-`
-  };
-
-  // Create each file in the file system
-  for (const [filename, content] of Object.entries(files)) {
-    try {
-      // Make sure path is correct - files go in the work directory
-      const filePath = `${WORK_DIR}/${filename}`;
-      await webcontainerInstance.fs.writeFile(filePath, content);
-      console.log(`Created: ${filePath}`);
-    } catch (error) {
-      console.error(`Error writing ${filename}:`, error);
+    if (!template) {
+      throw new Error('No project templates available');
     }
-  }
 
-  console.log('File system initialized successfully');
+    logger.info(`Creating initial files using template: ${template.id}`);
+    await installProjectTemplate(instance, template);
+  } catch (error) {
+    logger.error('Failed to create initial files:', error);
+    throw error;
+  }
+}
+
+async function installProjectTemplate(instance: WebContainer, template: ProjectTemplate) {
+  try {
+    for (const [path, content] of Object.entries(template.files)) {
+      const fullPath = `/workdir/${path}`;
+
+      // Ensure parent directory exists
+      const dirPath = fullPath.substring(0, fullPath.lastIndexOf('/'));
+      if (dirPath.length > 0) {
+        await instance.fs.mkdir(dirPath, { recursive: true });
+      }
+
+      // Write file with content
+      await instance.fs.writeFile(fullPath, content);
+    }
+
+    logger.info(`Successfully installed project template: ${template.id}`);
+  } catch (error) {
+    logger.error(`Failed to install project template ${template.id}:`, error);
+    throw error;
+  }
 }

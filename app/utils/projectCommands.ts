@@ -12,6 +12,49 @@ interface FileContent {
   path: string;
 }
 
+// Adding ProjectTemplate type for init-fs.ts
+export interface ProjectTemplate {
+  id: string;
+  name: string;
+  description: string;
+  files: Record<string, string>;
+}
+
+// Adding PROJECT_TEMPLATES export
+export const PROJECT_TEMPLATES: ProjectTemplate[] = [
+  {
+    id: 'python',
+    name: 'Python',
+    description: 'Simple Python project',
+    files: {
+      'main.py': 'print("Hello, World!")\n',
+      'requirements.txt': '# Python dependencies\n',
+      'README.md': '# Python Project\n\nThis is a simple Python project.\n'
+    }
+  },
+  {
+    id: 'node',
+    name: 'Node.js',
+    description: 'Simple Node.js project',
+    files: {
+      'index.js': 'console.log("Hello, World!");\n',
+      'package.json': JSON.stringify(
+        {
+          name: 'node-project',
+          version: '1.0.0',
+          description: 'A simple Node.js project',
+          main: 'index.js',
+          scripts: {
+            start: 'node index.js'
+          }
+        },
+        null,
+        2
+      )
+    }
+  }
+];
+
 export async function detectProjectCommands(files: FileContent[]): Promise<ProjectCommands> {
   const hasFile = (name: string) => files.some((f) => f.path.endsWith(name));
 
