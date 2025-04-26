@@ -8,6 +8,7 @@ import { ClientOnly } from 'remix-utils/client-only';
 import { Menu } from '~/components/sidebar/Menu.client';
 import { IconButton } from '~/components/ui/IconButton';
 import { Workbench } from '~/components/workbench/Workbench.client';
+import { WebContainerStatus } from '~/components/workbench/WebContainerStatus';
 import { classNames } from '~/utils/classNames';
 import { MODEL_LIST, PROVIDER_LIST, initializeModelList } from '~/utils/constants';
 import { Messages } from './Messages.client';
@@ -570,6 +571,7 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
               })}
           </div>
           <ClientOnly>{() => <Workbench chatStarted={chatStarted} isStreaming={isStreaming} />}</ClientOnly>
+          <ClientOnly>{() => <WebContainerStatus />}</ClientOnly>
         </div>
       </div>
     );

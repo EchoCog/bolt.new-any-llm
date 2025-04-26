@@ -78,7 +78,13 @@ ENV GROQ_API_KEY=${GROQ_API_KEY} \
     TOGETHER_API_KEY=${TOGETHER_API_KEY} \
     TOGETHER_API_BASE_URL=${TOGETHER_API_BASE_URL} \
     VITE_LOG_LEVEL=${VITE_LOG_LEVEL} \
-    DEFAULT_NUM_CTX=${DEFAULT_NUM_CTX}
+    DEFAULT_NUM_CTX=${DEFAULT_NUM_CTX} \
+    HOST=0.0.0.0 \
+    WRANGLER_SEND_METRICS=false
+
+# Modify wrangler.config.js to bind to all interfaces
+RUN mkdir -p /root/.config/.wrangler && \
+    echo '{"enabled":false}' > /root/.config/.wrangler/metrics.json
 
 RUN mkdir -p /app/run
-CMD pnpm run dev --host
+CMD ["sh", "-c", "HOST=0.0.0.0 pnpm run dockerstart"]
